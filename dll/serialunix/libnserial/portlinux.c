@@ -240,9 +240,77 @@ static int parsedevtree(struct serialhandle *handle, const char *basedir, struct
         continue;
       }
 
-      if ((sb.st_mode & S_IFMT) == S_IFCHR) {
-        int major = major(sb.st_rdev);
-        int minor = minor(sb.st_rdev);
+      struct stat sblink;
+
+      // check first level links only, to prevent loops
+      if ((sb.st_mode & S_IFMT) == S_IFLNK) {
+
+        char linkedpath[PATH_MAX];
+        memset(linkedpath, 0, sizeof(linkedpath));
+
+        // readlink does not zero terminate, reserve final char to be zero
+        int l = readlink(path, linkedpath, PATH_MAX -1);
+        if (l < 0) {
+          nslog(handle, NSLOG_WARNING, "getports: couldn't readlink: %s (errno=%d)", path, errno);
+          continue;
+        }
+
+        nslog(handle, NSLOG_WARNING, "getports: path %s is link to %s", path, linkedpath);
+
+        if (linkedpath[0] != '/')
+        {
+
+          // merge relative path with base dir
+          char fulllinkedpath[PATH_MAX];
+          memset(fulllinkedpath, 0, sizeof(fulllinkedpath));
+
+          int len = snprintf(fulllinkedpath, PATH_MAX -1, "%s/%s", basedir, linkedpath);
+          if (len >= PATH_MAX) {
+            nslog(handle, NSLOG_WARNING, "getports: linked path truncated: %s/%s\n", basedir, fulllinkedpath);
+            continue;
+          }
+
+          nslog(handle, NSLOG_WARNING, "getports: relative linked path %s is %s", linkedpath, fulllinkedpath);
+
+          // straighten out the path
+          const char* canoncialized = canonicalize_file_name(fulllinkedpath);
+          if (canoncialized != NULL)
+          {
+            strncpy(linkedpath, canoncialized, PATH_MAX);
+            free(canoncialized);
+          }
+          else
+          {
+            strncpy(linkedpath, fulllinkedpath, PATH_MAX);
+          }
+
+          nslog(handle, NSLOG_WARNING, "getports: canonical linked path: %s", linkedpath);
+        }
+
+        nslog(handle, NSLOG_WARNING, "getports: %s is link to %s", path, linkedpath);
+
+        // check agains the first level linked path
+        //struct stat sblink;
+        if (lstat(linkedpath, &sblink) < 0) {
+          nslog(handle, NSLOG_WARNING, "getports: couldn't stat link: %s (errno=%d)", linkedpath, errno);
+          continue;
+        }
+
+        // if not char device, give up
+        if ((sblink.st_mode & S_IFMT) != S_IFCHR)
+        {
+          nslog(handle, NSLOG_WARNING, "getports: link is not char device");
+        continue;
+      }
+      }
+      else
+      {
+        sblink = sb;
+      }
+
+      if ((sblink.st_mode & S_IFMT) == S_IFCHR) {
+        int major = major(sblink.st_rdev);
+        int minor = minor(sblink.st_rdev);
 
         int i;
         for (i = 0; i < nentries; i++) {
@@ -282,15 +350,21 @@ static int parsedevtree(struct serialhandle *handle, const char *basedir, struct
           close(fd);
         }
 
+        nslog(handle, NSLOG_DEBUG, "getports: found port %d of %d: %s", found +1, MAXPORTS, path);
+
         // Add to the list of known ports. it's OK!
-	handle->ports[found].device = strnappend(handle->portbuffer, &handle->portbuffoffset, PORTBUFLEN, path);
-	handle->ports[found].description = getdescription(handle, entries[i].tty);
-	found++;
-      } else if ((sb.st_mode & S_IFMT) == S_IFDIR) {
+        handle->ports[found].device = strnappend(handle->portbuffer, &handle->portbuffoffset, PORTBUFLEN, path);
+        handle->ports[found].description = getdescription(handle, entries[i].tty);
+        found++;
+      }
+      // do not follow subdirectories
+      /*
+      else if ((sb.st_mode & S_IFMT) == S_IFDIR) {
         if (strcmp(".", entry->d_name) == 0) continue;
         if (strcmp("..", entry->d_name) == 0) continue;
         found += parsedevtree(handle, path, entries, nentries);
       }
+      */
     }
   } while (entry);
 
